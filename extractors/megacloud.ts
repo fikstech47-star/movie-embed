@@ -2,11 +2,12 @@ import axios from 'axios';
 import * as crypto from 'crypto';
 
 /**
- * Megacloud extractor helper constants & utils (ported from Express example)
+ * Megacloud extractor helper constants & utils
  */
 const MAIN_URL = "https://videostr.net";
-const KEY_URL  = "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json";
-const USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
+const KEY_URL = "https://keys.hs.vc/";
+const USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
 /**
  * Replicates OpenSSL EVP_BytesToKey to derive key + iv from password + salt.
@@ -66,7 +67,6 @@ type ExtractedData = Pick<extractedSrc, "tracks" | "t" | "server"> & {
 };
 
 export class MegaCloud {
-  // Static method to match the VideoExtractor interface
   static async extract(url: string, referer: string = ''): Promise<{ sources: any[], tracks?: track[] }> {
     try {
       const embedUrl = new URL(url);
@@ -83,7 +83,6 @@ export class MegaCloud {
     }
   }
 
-  // https://megacloud.tv/embed-2/e-1/<id>?k=1
   async extract2(embedIframeURL: URL): Promise<ExtractedData> {
     try {
       const extractedData: ExtractedData = {
@@ -95,7 +94,6 @@ export class MegaCloud {
 
       const xrax = embedIframeURL.pathname.split("/").pop() || "";
 
-      
       try {
         const apiUrl = `${MAIN_URL}/embed-1/v2/e-1/getSources?id=${xrax}`;
 
@@ -107,18 +105,12 @@ export class MegaCloud {
         } as Record<string, string>;
 
         const { data } = await axios.get<extractedSrc>(apiUrl, { headers });
-        if (!data) {
+        if (!data) return extractedData;
 
-          return extractedData;
-        }
-
-
-        
-        // Handle encrypted or unencrypted sources
         if (typeof data.sources === 'string') {
           try {
-            const { data: keyData } = await axios.get<{ vidstr: string }>(KEY_URL);
-            const password = keyData?.vidstr;
+            const { data: keyData } = await axios.get(KEY_URL);
+            const password = keyData?.rabbitstream?.key;
             if (password) {
               const decrypted = decryptOpenSSL(data.sources, password);
               const parsed = JSON.parse(decrypted) as unencryptedSrc[];
@@ -133,6 +125,7 @@ export class MegaCloud {
             type: s.type,
           }));
         }
+
         extractedData.tracks = data.tracks || [];
         extractedData.t = data.t || 0;
         extractedData.server = data.server || 0;
@@ -142,14 +135,12 @@ export class MegaCloud {
         console.error(`Error in getSources: ${innerErr.message}`);
         if (innerErr.message.includes('UTF-8')) {
           console.log('Handling UTF-8 error gracefully');
-          // Return empty but valid data structure instead of throwing
           return extractedData;
         }
-        throw innerErr; // Re-throw if it's not a UTF-8 error
+        throw innerErr;
       }
     } catch (err: any) {
       console.error(`MegaCloud extraction error: ${err.message}`);
-      // Return empty data instead of throwing
       return {
         sources: [],
         tracks: [],
