@@ -5,7 +5,8 @@ import * as crypto from 'crypto';
  * Megacloud extractor helper constants & utils
  */
 const MAIN_URL = "https://videostr.net";
-const KEY_URL = "https://keys.hs.vc/";
+// JSON with keys is hosted publicly on GitHub (same file used by Android extractor example)
+const KEY_URL = "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json";
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
@@ -95,7 +96,23 @@ export class MegaCloud {
       const xrax = embedIframeURL.pathname.split("/").pop() || "";
 
       try {
-        const apiUrl = `${MAIN_URL}/embed-1/v2/e-1/getSources?id=${xrax}`;
+        // Fetch the embed page to obtain the required 48-character hash that must be sent as _k
+let token: string | undefined;
+try {
+  const { data: html } = await axios.get<string>(embedIframeURL.href, {
+    headers: {
+      Referer: embedIframeURL.href,
+      'User-Agent': USER_AGENT,
+    },
+  });
+  const match = html.match(/\b[a-zA-Z0-9]{48}\b/);
+  token = match ? match[0] : undefined;
+} catch (htmlErr) {
+  console.warn('Failed to fetch embed page for token:', (htmlErr as any).message);
+}
+
+// Use v3 endpoint (current as of 2025-07) and include _k if we found the token
+const apiUrl = `${MAIN_URL}/embed-1/v3/e-1/getSources?id=${xrax}${token ? `&_k=${token}` : ''}`;
 
         const headers = {
           Accept: '*/*',
@@ -110,7 +127,8 @@ export class MegaCloud {
         if (typeof data.sources === 'string') {
           try {
             const { data: keyData } = await axios.get(KEY_URL);
-            const password = keyData?.rabbitstream?.key;
+            // Prefer the "vidstr" key (matches Videostr extractor); fall back to legacy field names if present
+const password: string | undefined = keyData?.vidstr ?? keyData?.rabbit ?? keyData?.rabbitstream?.key;
             if (password) {
               const decrypted = decryptOpenSSL(data.sources, password);
               const parsed = JSON.parse(decrypted) as unencryptedSrc[];
