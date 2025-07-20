@@ -5,7 +5,6 @@ import * as crypto from 'crypto';
  * Megacloud extractor helper constants & utils
  */
 const MAIN_URL = "https://videostr.net";
-// JSON with keys is hosted publicly on GitHub (same file used by Android extractor example)
 const KEY_URL = "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json";
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
@@ -16,22 +15,24 @@ const USER_AGENT =
 function evpBytesToKey(password: string, salt: Buffer, keyLen = 32, ivLen = 16) {
   let data = Buffer.alloc(0);
   let prev = Buffer.alloc(0);
+
   while (data.length < keyLen + ivLen) {
     const md5 = crypto.createHash('md5');
     md5.update(Buffer.concat([prev, Buffer.from(password), salt]));
     prev = md5.digest();
     data = Buffer.concat([data, prev]);
   }
+
   return {
     key: data.slice(0, keyLen),
-    iv: data.slice(keyLen, keyLen + ivLen)
+    iv: data.slice(keyLen, keyLen + ivLen),
   };
 }
 
 /**
  * Decrypts an OpenSSL-compatible base64 string encrypted with AES-256-CBC.
  */
-function decryptOpenSSL(encryptedB64: string, password: string) {
+function decryptOpenSSL(encryptedB64: string, password: string): string {
   const encrypted = Buffer.from(encryptedB64, 'base64');
   if (!encrypted.slice(0, 8).equals(Buffer.from('Salted__'))) {
     throw new Error('Invalid OpenSSL format');
@@ -73,10 +74,9 @@ export class MegaCloud {
       const embedUrl = new URL(url);
       const instance = new MegaCloud();
       const result = await instance.extract2(embedUrl);
-      
       return {
         sources: result.sources,
-        tracks: result.tracks
+        tracks: result.tracks,
       };
     } catch (err: any) {
       console.error("MegaCloud extraction error:", err.message);
@@ -85,86 +85,75 @@ export class MegaCloud {
   }
 
   async extract2(embedIframeURL: URL): Promise<ExtractedData> {
+    const extractedData: ExtractedData = {
+      sources: [],
+      tracks: [],
+      t: 0,
+      server: 0,
+    };
+
     try {
-      const extractedData: ExtractedData = {
-        sources: [],
-        tracks: [],
-        t: 0,
-        server: 0,
-      };
+      const id = embedIframeURL.pathname.split("/").pop() || "";
+      let token: string | undefined;
 
-      const xrax = embedIframeURL.pathname.split("/").pop() || "";
-
+      // Fetch token from embed page
       try {
-        // Fetch the embed page to obtain the required 48-character hash that must be sent as _k
-let token: string | undefined;
-try {
-  const { data: html } = await axios.get<string>(embedIframeURL.href, {
-    headers: {
-      Referer: embedIframeURL.href,
-      'User-Agent': USER_AGENT,
-    },
-  });
-  const match = html.match(/\b[a-zA-Z0-9]{48}\b/);
-  token = match ? match[0] : undefined;
-} catch (htmlErr) {
-  console.warn('Failed to fetch embed page for token:', (htmlErr as any).message);
-}
-
-// Use v3 endpoint (current as of 2025-07) and include _k if we found the token
-const apiUrl = `${MAIN_URL}/embed-1/v3/e-1/getSources?id=${xrax}${token ? `&_k=${token}` : ''}`;
-
-        const headers = {
-          Accept: '*/*',
-          'X-Requested-With': 'XMLHttpRequest',
-          Referer: MAIN_URL,
-          'User-Agent': USER_AGENT
-        } as Record<string, string>;
-
-        const { data } = await axios.get<extractedSrc>(apiUrl, { headers });
-        if (!data) return extractedData;
-
-        if (typeof data.sources === 'string') {
-          try {
-            const { data: keyData } = await axios.get(KEY_URL);
-            // Prefer the "vidstr" key (matches Videostr extractor); fall back to legacy field names if present
-const password: string | undefined = keyData?.vidstr ?? keyData?.rabbit ?? keyData?.rabbitstream?.key;
-            if (password) {
-              const decrypted = decryptOpenSSL(data.sources, password);
-              const parsed = JSON.parse(decrypted) as unencryptedSrc[];
-              extractedData.sources = parsed.map(src => ({ file: src.file, type: src.type }));
-            }
-          } catch (deErr: any) {
-            console.error('Failed to decrypt/parse sources:', deErr.message);
-          }
-        } else if (Array.isArray(data.sources)) {
-          extractedData.sources = data.sources.map((s) => ({
-            file: s.file,
-            type: s.type,
-          }));
-        }
-
-        extractedData.tracks = data.tracks || [];
-        extractedData.t = data.t || 0;
-        extractedData.server = data.server || 0;
-
-        return extractedData;
-      } catch (innerErr: any) {
-        console.error(`Error in getSources: ${innerErr.message}`);
-        if (innerErr.message.includes('UTF-8')) {
-          console.log('Handling UTF-8 error gracefully');
-          return extractedData;
-        }
-        throw innerErr;
+        const { data: html } = await axios.get<string>(embedIframeURL.href, {
+          headers: {
+            Referer: embedIframeURL.href,
+            'User-Agent': USER_AGENT,
+          },
+        });
+        const match = html.match(/\b[a-zA-Z0-9]{48}\b/);
+        token = match?.[0];
+      } catch (err) {
+        console.warn("Failed to fetch token from embed page:", (err as any).message);
       }
-    } catch (err: any) {
-      console.error(`MegaCloud extraction error: ${err.message}`);
-      return {
-        sources: [],
-        tracks: [],
-        t: 0,
-        server: 0
+
+      const apiUrl = `${MAIN_URL}/embed-1/v3/e-1/getSources?id=${id}${token ? `&_k=${token}` : ''}`;
+
+      const headers: Record<string, string> = {
+        Accept: '*/*',
+        'X-Requested-With': 'XMLHttpRequest',
+        Referer: MAIN_URL,
+        'User-Agent': USER_AGENT,
       };
+
+      const { data } = await axios.get<extractedSrc>(apiUrl, { headers });
+      if (!data) return extractedData;
+
+      if (typeof data.sources === 'string') {
+        try {
+          const { data: keyData } = await axios.get(KEY_URL);
+          const password: string | undefined =
+            keyData?.vidstr ?? keyData?.rabbit ?? keyData?.rabbitstream?.key;
+
+          if (password) {
+            const decrypted = decryptOpenSSL(data.sources, password);
+            const parsed = JSON.parse(decrypted) as unencryptedSrc[];
+            extractedData.sources = parsed.map(src => ({
+              file: src.file,
+              type: src.type,
+            }));
+          }
+        } catch (err: any) {
+          console.error("Failed to decrypt or parse video sources:", err.message);
+        }
+      } else if (Array.isArray(data.sources)) {
+        extractedData.sources = data.sources.map(src => ({
+          file: src.file,
+          type: src.type,
+        }));
+      }
+
+      extractedData.tracks = data.tracks || [];
+      extractedData.t = data.t || 0;
+      extractedData.server = data.server || 0;
+
+      return extractedData;
+    } catch (err: any) {
+      console.error("Extraction error in extract2:", err.message);
+      return extractedData;
     }
   }
 }
