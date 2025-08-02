@@ -4,17 +4,23 @@ FROM node:18
 # Set working directory
 WORKDIR /app
 
-# Copy package.json and package-lock.json first for caching
+# Copy package.json and package-lock.json first
 COPY package*.json ./
 
 # Install dependencies
 RUN npm install
 
-# Copy all source files
+# If using TypeScript, also install ts-node and typescript (optional)
+# RUN npm install --save-dev typescript ts-node
+
+# Install nodemon globally for dev mode
+RUN npm install -g nodemon
+
+# Copy all project files
 COPY . .
 
-# Expose the port your app listens on
+# Expose the port (change if different)
 EXPOSE 3000
 
-# Default command to run your app
-CMD ["npm", "start"]
+# Run dev server
+CMD ["npm", "run", "dev"]
