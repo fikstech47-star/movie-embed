@@ -13,9 +13,6 @@ RUN npm install
 # Copy all source files
 COPY . .
 
-# Build TypeScript to JavaScript (assuming you have a build script)
-RUN npm run build
-
 # Expose the port your app listens on
 EXPOSE 3000
 
