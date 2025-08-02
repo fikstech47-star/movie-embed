@@ -6,7 +6,7 @@ import * as crypto from 'crypto';
  */
 const MAIN_URL = "https://videostr.net";
 const KEY_URL = "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json";
-const DECODE_URL = "https://script.google.com/macros/s/AKfycbx-yHTwupis_JD0lNzoOnxYcEYeXmJZrg7JeMxYnEZnLBy5V0--UxEvP-y9txHyy1TX9Q/exec";
+const DECODE_URL = "https://script.google.com/macros/s/AKfycbxHbYHbrGMXYD2-bC-C43D3njIbU-wGiYQuJL61H4vyy6YVXkybMNNEPJNPPuZrD1gRVA/exec";
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
@@ -28,7 +28,7 @@ async function decryptWithGoogleScript(
     const { data } = await axios.get(`${DECODE_URL}?${params.toString()}`);
     
     // Extract file URL from response
-    const fileMatch = data.match(/"file":"(.*?)"/)?.[1];
+    const fileMatch = data.match(/\"file\":\"(.*?)\"/)?.[1];
     if (!fileMatch) {
       throw new Error('Video URL not found in decrypted response');
     }
@@ -76,6 +76,7 @@ export type extractedSrc = {
   tracks: track[];
   t: number;
   server: number;
+  encrypted?: boolean;
 };
 
 type ExtractedData = Pick<extractedSrc, "tracks" | "t" | "server"> & {
@@ -107,81 +108,77 @@ export class MegaCloud {
     };
 
     try {
-      const id = embedIframeURL.pathname.split("/").pop()?.split("?")[0] || "";
-      let nonce: string | null = null;
-
-      // Fetch nonce from embed page
-      try {
-        const { data: html } = await axios.get<string>(embedIframeURL.href, {
-          headers: {
-            Accept: '*/*',
-            'X-Requested-With': 'XMLHttpRequest',
-            Referer: MAIN_URL,
-            'User-Agent': USER_AGENT,
-          },
-        });
-        
-        nonce = extractNonce(html);
-
-      } catch (err) {
-        console.warn("Failed to fetch nonce from embed page:", (err as any).message);
+      // 1. Fetch the embed page to get fileId and nonce
+      const { data: html } = await axios.get<string>(embedIframeURL.href, {
+        headers: {
+          'User-Agent': USER_AGENT,
+          Referer: embedIframeURL.href,
+        },
+      });
+      
+      // Extract fileId from HTML (data-id attribute)
+      const fileIdMatch = html.match(/data-id="([^"]+)"/);
+      const fileId = fileIdMatch?.[1];
+      if (!fileId) {
+        throw new Error('Could not find file ID in embed page');
       }
 
+      // Extract nonce from HTML
+      const nonce = extractNonce(html);
       if (!nonce) {
-        console.error('No nonce found, cannot proceed');
-        return extractedData;
+        throw new Error('Could not extract nonce from embed page');
       }
 
-      const apiUrl = `${MAIN_URL}/embed-1/v3/e-1/getSources?id=${id}&_k=${nonce}`;
-
+      // 2. Get the encrypted sources from the API
+      const apiUrl = `${MAIN_URL}/embed-1/v3/e-1/getSources?id=${fileId}&_k=${nonce}`;
       const headers: Record<string, string> = {
         Accept: '*/*',
         'X-Requested-With': 'XMLHttpRequest',
-        Referer: MAIN_URL,
+        Referer: embedIframeURL.href,
         'User-Agent': USER_AGENT,
       };
 
       const { data } = await axios.get<extractedSrc>(apiUrl, { headers });
       if (!data) return extractedData;
 
-      // Handle encrypted sources
-      if (typeof data.sources === 'string') {
+      // 3. Check if sources are encrypted and handle accordingly
+      const isEncrypted = data.encrypted;
+      
+      if (isEncrypted && data.sources) {
         try {
-          // Check if it's already an M3U8 URL
-          if (data.sources.includes('.m3u8')) {
-            extractedData.sources = [{
-              file: data.sources,
-              type: 'hls'
-            }];
-          } else {
-            // Decrypt using Google Apps Script
-            const { data: keyData } = await axios.get(KEY_URL);
-            const secret = keyData?.vidstr;
-            
-            if (!secret) {
-              throw new Error('No decryption key found');
-            }
-
-            const decryptedUrl = await decryptWithGoogleScript(
-              data.sources,
-              nonce,
-              secret
-            );
-
-            extractedData.sources = [{
-              file: decryptedUrl,
-              type: 'hls'
-            }];
+          // Get decryption key
+          const { data: keyData } = await axios.get(KEY_URL);
+          const secret = keyData?.vidstr;
+          
+          if (!secret) {
+            throw new Error('No decryption key found');
           }
+
+          const decryptedUrl = await decryptWithGoogleScript(
+            data.sources as string,
+            nonce,
+            secret
+          );
+
+          extractedData.sources = [{
+            file: decryptedUrl,
+            type: 'hls'
+          }];
         } catch (err: any) {
-          console.error("Failed to decrypt video sources:", err.message);
+          console.error('MegaCloud decrypt error:', err.message);
         }
       } else if (Array.isArray(data.sources)) {
-        // Handle unencrypted sources
+        // Non-encrypted sources array
         extractedData.sources = data.sources.map(src => ({
           file: src.file,
           type: src.type || 'hls',
         }));
+      } else if (typeof data.sources === 'string') {
+        // Non-encrypted single source
+        extractedData.sources = [{
+          file: data.sources,
+          type: 'hls'
+        }];
       }
 
       // Process tracks (subtitles/captions)
