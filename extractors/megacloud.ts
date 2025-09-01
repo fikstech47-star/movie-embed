@@ -6,38 +6,53 @@ import * as crypto from 'crypto';
  */
 const MAIN_URL = "https://videostr.net";
 const KEY_URL = "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json";
-const DECODE_URL = "https://script.google.com/macros/s/AKfycbxHbYHbrGMXYD2-bC-C43D3njIbU-wGiYQuJL61H4vyy6YVXkybMNNEPJNPPuZrD1gRVA/exec";
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
-/**
- * Decrypts video sources using Google Apps Script service
- */
-async function decryptWithGoogleScript(
-  encryptedData: string,
-  nonce: string,
-  secret: string
-): Promise<string> {
-  try {
-    const params = new URLSearchParams({
-      encrypted_data: encryptedData,
-      nonce: nonce,
-      secret: secret,
-    });
-
-    const { data } = await axios.get(`${DECODE_URL}?${params.toString()}`);
-    
-    // Extract file URL from response
-    const fileMatch = data.match(/\"file\":\"(.*?)\"/)?.[1];
-    if (!fileMatch) {
-      throw new Error('Video URL not found in decrypted response');
-    }
-    
-    return fileMatch;
-  } catch (error: any) {
-    console.error('Google Apps Script decryption failed:', error.message);
-    throw error;
+// --- Local crypto helpers (OpenSSL-compatible) ---
+function evpBytesToKey(password: string, salt: Buffer, keyLen = 32, ivLen = 16) {
+  let data = Buffer.alloc(0);
+  let prev = Buffer.alloc(0);
+  while (data.length < keyLen + ivLen) {
+    const md5 = crypto.createHash('md5');
+    md5.update(Buffer.concat([prev, Buffer.from(password), salt]));
+    prev = md5.digest();
+    data = Buffer.concat([data, prev]);
   }
+  return { key: data.slice(0, keyLen), iv: data.slice(keyLen, keyLen + ivLen) };
+}
+
+function decryptOpenSSL(encryptedB64: string, password: string): string {
+  const buf = Buffer.from(encryptedB64, 'base64');
+  if (!buf.slice(0, 8).equals(Buffer.from('Salted__'))) {
+    throw new Error('Invalid OpenSSL format');
+  }
+  const salt = buf.slice(8, 16);
+  const { key, iv } = evpBytesToKey(password, salt);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  let out = decipher.update(buf.slice(16));
+  out = Buffer.concat([out, decipher.final()]);
+  return out.toString('utf8');
+}
+
+function decryptLocally(encryptedData: string, nonce: string, secret: string): string {
+  // 1) Try OpenSSL salted payload first
+  try {
+    return decryptOpenSSL(encryptedData, secret);
+  } catch {}
+
+  // 2) Fallback: AES-256-CBC with key=sha256(secret) and iv=first 16 bytes of nonce
+  try {
+    const key = crypto.createHash('sha256').update(String(secret)).digest();
+    const iv = Buffer.from(String(nonce)).slice(0, 16);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    const enc = Buffer.from(encryptedData, 'base64');
+    let out = decipher.update(enc);
+    out = Buffer.concat([out, decipher.final()]);
+    return out.toString('utf8');
+  } catch {}
+
+  throw new Error('Local decryption failed');
 }
 
 /**
@@ -154,16 +169,17 @@ export class MegaCloud {
             throw new Error('No decryption key found');
           }
 
-          const decryptedUrl = await decryptWithGoogleScript(
-            data.sources as string,
-            nonce,
-            secret
-          );
+          const decryptedText = decryptLocally(data.sources as string, nonce, secret);
+          let fileUrl: string | null = null;
+          try {
+            const obj = JSON.parse(decryptedText);
+            fileUrl = obj?.file || obj?.url || null;
+          } catch {
+            fileUrl = decryptedText;
+          }
+          if (!fileUrl) throw new Error('Video URL not found in decrypted text');
 
-          extractedData.sources = [{
-            file: decryptedUrl,
-            type: 'hls'
-          }];
+          extractedData.sources = [{ file: fileUrl, type: 'hls' }];
         } catch (err: any) {
           console.error('MegaCloud decrypt error:', err.message);
         }
